@@ -4,7 +4,7 @@
 
 /**
  * GitHub Commit Streak & End-of-Year Countdown iOS Widget
- * Author: Antigravity AI
+ * Author: Desire
  * 
  * Instructions:
  * 1. Copy this entire script.
