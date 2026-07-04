@@ -32,11 +32,12 @@ if (!fm.fileExists(cacheDir)) {
 }
 const cacheFile = fm.joinPath(cacheDir, `${username}-cache.json`);
 
-// Fetch data
+// Fetch data (Scraper API data + real-time GitHub Event check)
 let data = await loadData(username);
+let hasRecentActivity = await checkRecentGitHubActivity(username);
 
 // Compute metrics
-const metrics = calculateMetrics(data);
+const metrics = calculateMetrics(data, hasRecentActivity);
 
 // Create Widget
 let widget = await createWidget(metrics);
@@ -54,7 +55,7 @@ Script.complete();
 // CORE METRICS & COMPUTATION
 // ==========================================
 
-function calculateMetrics(data) {
+function calculateMetrics(data, hasRecentActivity) {
   const now = new Date();
   const currentYear = now.getFullYear();
   const endOfYear = new Date(currentYear, 11, 31, 23, 59, 59);
@@ -101,6 +102,15 @@ function calculateMetrics(data) {
     }
   });
 
+  // Inject today as committed if detected by the live GitHub Events API
+  // (Bypasses the 1-hour cache of the scraper API)
+  if (hasRecentActivity) {
+    if (!contribMap[todayStr] || contribMap[todayStr].count === 0) {
+      contribMap[todayStr] = { date: todayStr, count: 1, level: 1 };
+      totalCommitsThisYear += 1;
+    }
+  }
+
   // Calculate Streak
   let currentStreak = 0;
   let hasCommitsToday = (contribMap[todayStr] && contribMap[todayStr].count > 0);
@@ -124,6 +134,15 @@ function calculateMetrics(data) {
   
   // Sort contributions chronologically to find longest streak
   const sortedContribs = [...contributions].sort((a, b) => a.date.localeCompare(b.date));
+  
+  // Apply today to the sorted array if it's not already added/active
+  const todayIdx = sortedContribs.findIndex(c => c.date === todayStr);
+  if (hasRecentActivity && todayIdx === -1) {
+    sortedContribs.push({ date: todayStr, count: 1, level: 1 });
+  } else if (hasRecentActivity && todayIdx !== -1) {
+    sortedContribs[todayIdx] = { date: todayStr, count: Math.max(sortedContribs[todayIdx].count, 1), level: Math.max(sortedContribs[todayIdx].level, 1) };
+  }
+
   sortedContribs.forEach(c => {
     if (c.count > 0) {
       tempStreak++;
@@ -201,6 +220,49 @@ async function loadData(username) {
       contributions: []
     };
   }
+}
+
+// Checks official GitHub API to see if the user made commits today.
+// (Bypasses the 1-hour cache of the scraper API)
+async function checkRecentGitHubActivity(username) {
+  const url = `https://api.github.com/users/${username}/events`;
+  try {
+    const req = new Request(url);
+    req.headers = { "User-Agent": "Scriptable-GitHub-Streak-Widget" };
+    req.timeoutInterval = 8;
+    const events = await req.loadJSON();
+    
+    if (events && Array.isArray(events)) {
+      // Get today's local date in YYYY-MM-DD
+      const now = new Date();
+      const formatDate = (date) => {
+        let d = new Date(date),
+            month = '' + (d.getMonth() + 1),
+            day = '' + d.getDate(),
+            year = d.getFullYear();
+        if (month.length < 2) month = '0' + month;
+        if (day.length < 2) day = '0' + day;
+        return [year, month, day].join('-');
+      };
+      
+      const todayStr = formatDate(now);
+      const contribTypes = ["PushEvent", "PullRequestEvent", "IssuesEvent", "CommitCommentEvent"];
+      
+      // Look for any contribution event created on today's local date
+      const hasTodayEvent = events.some(event => {
+        if (!contribTypes.includes(event.type)) return false;
+        
+        // Convert the event created_at (UTC) to a local date string
+        const eventDateStr = formatDate(new Date(event.created_at));
+        return eventDateStr === todayStr;
+      });
+      
+      return hasTodayEvent;
+    }
+  } catch (err) {
+    console.warn("Failed to fetch real-time events from GitHub API: " + err.message);
+  }
+  return false;
 }
 
 // ==========================================
@@ -344,9 +406,9 @@ function renderMediumWidget(widget, metrics) {
   
   streakHeader.addSpacer(4);
   
-  const streakValText = streakHeader.addText(`${metrics.currentStreak}`);
-  streakValText.font = Font.boldRoundedSystemFont(18);
-  streakValText.textColor = new Color("#ffffff");
+  const streakVal = streakHeader.addText(`${metrics.currentStreak}`);
+  streakVal.font = Font.boldRoundedSystemFont(18);
+  streakVal.textColor = new Color("#ffffff");
   
   streakHeader.addSpacer(4);
   
@@ -468,12 +530,10 @@ function renderLargeWidget(widget, metrics) {
   barBg.backgroundColor = new Color("#21262d");
   
   // Fill is simulated using padding/flexible spacers inside parent stack
-  // In Scriptable we can do a side-by-side stack for the progress bar
   const barStack = progStack.addStack();
   barStack.layoutHorizontally();
   
   const filledBar = barStack.addStack();
-  // Compute approximate width multiplier
   filledBar.size = new Size(290 * (metrics.progressPercent / 100), 6);
   filledBar.cornerRadius = 3;
   filledBar.backgroundColor = new Color("#30a14e");
@@ -517,7 +577,7 @@ function renderLargeWidget(widget, metrics) {
 
   widget.addSpacer(14);
 
-  // Row 5: Heatmap Grid (Last 35 days, 5 weeks of 7 days)
+  // Row 5: Heatmap Grid (Last 35 days)
   const gridTitleStack = widget.addStack();
   const gridTitle = gridTitleStack.addText("HEATMAP (PAST 5 WEEKS)");
   gridTitle.font = Font.boldSystemFont(8);
@@ -525,10 +585,6 @@ function renderLargeWidget(widget, metrics) {
   
   widget.addSpacer(4);
   
-  // Render a 7-row by 5-col grid or 5-row by 7-col grid.
-  // Standard GitHub grid is columns of days (grouped by weeks).
-  // We have last35Days array, chronologically.
-  // Let's divide into 5 columns of 7 days.
   const heatmapRow = widget.addStack();
   heatmapRow.layoutHorizontally();
   
@@ -540,7 +596,6 @@ function renderLargeWidget(widget, metrics) {
     new Color("#39d353")
   ];
   
-  // Render 5 columns side-by-side
   for (let w = 0; w < 5; w++) {
     const col = heatmapRow.addStack();
     col.layoutVertically();

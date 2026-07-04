@@ -25,9 +25,6 @@ const generateMockData = () => {
     d.setDate(now.getDate() - i);
     const dStr = formatDateStr(d);
     
-    // Default mock distribution:
-    // - 70% chance of 0 commits
-    // - 30% chance of commits (level 1-4)
     let count = 0;
     let level = 0;
     
@@ -43,7 +40,7 @@ const generateMockData = () => {
     contributions.push({ date: dStr, count, level });
   }
 
-  // Inject a solid active streak for the past 6 days to make it look nice out-of-the-box
+  // Inject a solid active streak for the past 6 days
   for (let i = 6; i >= 1; i--) {
     const d = new Date(now);
     d.setDate(now.getDate() - i);
@@ -69,7 +66,7 @@ export default function App() {
   const [inputUsername, setInputUsername] = useState<string>(INITIAL_USERNAME);
   const [widgetSize, setWidgetSize] = useState<'small' | 'medium' | 'large'>('medium');
   const [activeTab, setActiveTab] = useState<'dashboard' | 'code'>('dashboard');
-  const [isMockMode, setIsMockMode] = useState<boolean>(true); // Start in mock mode for instant interactive playground
+  const [isMockMode, setIsMockMode] = useState<boolean>(true);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -83,6 +80,7 @@ export default function App() {
     setLoading(true);
     setError(null);
     try {
+      // 1. Fetch contribution calendar (caches for 1 hour)
       const response = await fetch(`https://github-contributions-api.jogruber.de/v4/${user}`);
       if (!response.ok) {
         throw new Error(`Failed to fetch user. GitHub profile might be private or does not exist.`);
@@ -92,12 +90,44 @@ export default function App() {
       if (!data.contributions || data.contributions.length === 0) {
         throw new Error("No contributions found for this user.");
       }
+
+      // 2. Query GitHub API events for today (updates instantly)
+      let hasRecentActivity = false;
+      try {
+        const eventsResponse = await fetch(`https://api.github.com/users/${user}/events`);
+        if (eventsResponse.ok) {
+          const events = await eventsResponse.json();
+          if (Array.isArray(events)) {
+            const todayStr = formatDateStr(new Date());
+            const contribTypes = ["PushEvent", "PullRequestEvent", "IssuesEvent", "CommitCommentEvent"];
+            hasRecentActivity = events.some((event: any) => {
+              if (!contribTypes.includes(event.type)) return false;
+              const eventDateStr = formatDateStr(new Date(event.created_at));
+              return eventDateStr === todayStr;
+            });
+          }
+        }
+      } catch (eventErr) {
+        console.warn("Failed to check real-time events API:", eventErr);
+      }
+
+      // Merge results
+      const contributionsList = [...data.contributions] as ContributionDay[];
+      if (hasRecentActivity) {
+        const todayStr = formatDateStr(new Date());
+        const todayIdx = contributionsList.findIndex(c => c.date === todayStr);
+        if (todayIdx === -1) {
+          contributionsList.push({ date: todayStr, count: 1, level: 1 });
+        } else if (contributionsList[todayIdx].count === 0) {
+          contributionsList[todayIdx] = { date: todayStr, count: 1, level: 1 };
+        }
+      }
       
-      setRawContributions(data.contributions);
-      setIsMockMode(false); // Switch to live mode on successful fetch
+      setRawContributions(contributionsList);
+      setIsMockMode(false);
     } catch (err: any) {
       setError(err.message || 'Failed to load GitHub data');
-      setIsMockMode(true); // Fallback to mock mode
+      setIsMockMode(true);
     } finally {
       setLoading(false);
     }
@@ -105,7 +135,6 @@ export default function App() {
 
   // Fetch initial profile on load
   useEffect(() => {
-    // Generate initial mock data
     setRawContributions(generateMockData());
   }, []);
 
@@ -115,7 +144,7 @@ export default function App() {
     const currentYear = now.getFullYear();
     const endOfYear = new Date(currentYear, 11, 31, 23, 59, 59);
 
-    // 1. Days Remaining
+    // Calculate Days Remaining
     const msInDay = 24 * 60 * 60 * 1000;
     const timeDiff = endOfYear.getTime() - now.getTime();
     const daysRemaining = Math.max(0, Math.ceil(timeDiff / msInDay));
@@ -172,7 +201,7 @@ export default function App() {
       }
     }
 
-    // Longest Streak in current year/dataset
+    // Longest Streak
     let longestStreak = 0;
     let tempStreak = 0;
     const sortedContribs = [...mergedContributions].sort((a, b) => a.date.localeCompare(b.date));
@@ -236,12 +265,10 @@ export default function App() {
     setIsMockMode(isMock);
     setError(null);
     if (isMock) {
-      // Re-initialize with generic mock data if it was cleared
       if (rawContributions.length === 0) {
         setRawContributions(generateMockData());
       }
     } else {
-      // Fetch live data for current username
       fetchGitHubContributions(username);
     }
   };
@@ -345,7 +372,7 @@ export default function App() {
                 {/* Renders widget preview inside phone screen */}
                 <WidgetSimulator metrics={metrics} size={widgetSize} />
                 
-                {/* Placeholder App Icons to make it look like iOS Home Screen */}
+                {/* Placeholder App Icons */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px', marginTop: '16px', padding: '0 8px' }}>
                   {['App Store', 'GitHub', 'Settings', 'VS Code'].map((name, i) => (
                     <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
